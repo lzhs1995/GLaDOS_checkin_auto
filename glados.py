@@ -21,20 +21,40 @@ if __name__ == '__main__':
     payload={
         'token': 'glados.one'
     }
+    headers = {
+        'cookie': '',
+        'referer': referer,
+        'origin': origin,
+        'user-agent': useragent,
+        'content-type': 'application/json;charset=UTF-8',
+    }
+    failed = 0
     for cookie in cookies:
-        checkin = requests.post(url,headers={'cookie': cookie ,'referer': referer,'origin':origin,'user-agent':useragent,'content-type':'application/json;charset=UTF-8'},data=json.dumps(payload))
-        state =  requests.get(url2,headers={'cookie': cookie ,'referer': referer,'origin':origin,'user-agent':useragent})
+        headers['cookie'] = cookie
+        checkin = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+        state = requests.get(url2, headers=headers, timeout=30)
+        state_json = state.json()
+        if 'data' not in state_json:
+            failed += 1
+            print('cookie已失效或格式错误: ' + state.text[:200])
+            if sckey:
+                requests.get('http://www.pushplus.plus/send?token=' + sckey + '&content=cookie已失效')
+            continue
     #--------------------------------------------------------------------------------------------------------#  
-        time = state.json()['data']['leftDays']
+        time = state_json['data']['leftDays']
         time = time.split('.')[0]
-        email = state.json()['data']['email']
+        email = state_json['data']['email']
         if 'message' in checkin.text:
             mess = checkin.json()['message']
             print(email+'----结果--'+mess+'----剩余('+time+')天')  # 日志输出
             sendContent += email+'----'+mess+'----剩余('+time+')天\n'
         else:
-            requests.get('http://www.pushplus.plus/send?token=' + sckey + '&content='+email+'cookie已失效')
-            print('cookie已失效')  # 日志输出
+            failed += 1
+            if sckey:
+                requests.get('http://www.pushplus.plus/send?token=' + sckey + '&content='+email+'cookie已失效')
+            print(email + '----cookie已失效')
+    if failed:
+        raise SystemExit(1)
      #--------------------------------------------------------------------------------------------------------#   
     if sckey != "":
          requests.get('http://www.pushplus.plus/send?token=' + sckey + '&title='+email+'签到成功'+'&content='+sendContent)
