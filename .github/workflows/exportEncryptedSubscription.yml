@@ -18,8 +18,10 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import ipaddress
           import os
           import pathlib
+          import subprocess
           import urllib.error
           import urllib.request
 
@@ -57,6 +59,47 @@ jobs:
                   with urllib.request.urlopen(config_request, timeout=30) as response:
                       candidate = response.read()
               except (OSError, urllib.error.URLError):
+                  candidate = None
+                  for nameserver in (
+                      "dave.ns.cloudflare.com",
+                      "dora.ns.cloudflare.com",
+                  ):
+                      lookup = subprocess.run(
+                          ["dig", "+short", f"@{nameserver}", host, "A"],
+                          check=False,
+                          capture_output=True,
+                          text=True,
+                          timeout=15,
+                      )
+                      addresses = [
+                          line.strip() for line in lookup.stdout.splitlines() if line.strip()
+                      ]
+                      if not addresses:
+                          continue
+                      try:
+                          address = str(ipaddress.ip_address(addresses[0]))
+                      except ValueError:
+                          continue
+                      download = subprocess.run(
+                          [
+                              "curl",
+                              "--silent",
+                              "--show-error",
+                              "--fail",
+                              "--max-time",
+                              "30",
+                              "--resolve",
+                              f"{host}:443:{address}",
+                              subscription,
+                          ],
+                          check=False,
+                          capture_output=True,
+                          timeout=40,
+                      )
+                      if download.returncode == 0:
+                          candidate = download.stdout
+                          break
+              if candidate is None:
                   continue
               if b"proxies:" in candidate and b"US-Dedicated-B1-1" in candidate:
                   config = candidate.decode("utf-8")
