@@ -20,6 +20,7 @@ jobs:
           import json
           import os
           import pathlib
+          import urllib.error
           import urllib.request
 
           cookie = os.environ.get("GLADOS_COOKIE", "").split("&", 1)[0]
@@ -43,19 +44,35 @@ jobs:
           if not all(data.get(field) not in (None, "") for field in required):
               raise SystemExit("GLaDOS status did not contain subscription coordinates")
 
-          subscription = (
-              "https://update.glados-config.com/mihomo/"
-              f"{data['configureId']}/{data['code']}/{data['port']}/glados.yaml"
+          config = None
+          for host in ("update.glados-config.com", "www.glados-config.com"):
+              subscription = (
+                  f"https://{host}/mihomo/"
+                  f"{data['configureId']}/{data['code']}/{data['port']}/glados.yaml"
+              )
+              try:
+                  config_request = urllib.request.Request(
+                      subscription, headers={"User-Agent": "Mozilla/5.0"}
+                  )
+                  with urllib.request.urlopen(config_request, timeout=30) as response:
+                      candidate = response.read()
+              except (OSError, urllib.error.URLError):
+                  continue
+              if b"proxies:" in candidate and b"US-Dedicated-B1-1" in candidate:
+                  config = candidate.decode("utf-8")
+                  break
+
+          export = {
+              "schema_version": 1,
+              "status": payload,
+              "mihomo_config": config,
+          }
+          encoded = json.dumps(export, separators=(",", ":")).encode()
+          pathlib.Path("/tmp/glados-export.json").write_bytes(encoded)
+          print(
+              "Authenticated export accepted "
+              f"(subscription_available={config is not None}, encrypted bytes pending)"
           )
-          config_request = urllib.request.Request(
-              subscription, headers={"User-Agent": "Mozilla/5.0"}
-          )
-          with urllib.request.urlopen(config_request, timeout=30) as response:
-              config = response.read()
-          if b"proxies:" not in config or b"US-Dedicated-B1-1" not in config:
-              raise SystemExit("subscription response failed the expected structure gate")
-          pathlib.Path("/tmp/glados-config.yaml").write_bytes(config)
-          print(f"Authenticated subscription accepted ({len(config)} encrypted bytes pending)")
           PY
 
       - name: Encrypt response for local operator
@@ -66,8 +83,8 @@ jobs:
           iv_hex="$(tail -c 16 /tmp/keyiv.bin | xxd -p -c 256)"
           openssl enc -aes-256-cbc \
             -K "$key_hex" -iv "$iv_hex" \
-            -in /tmp/glados-config.yaml \
-            -out /tmp/glados-config.enc
+            -in /tmp/glados-export.json \
+            -out /tmp/glados-export.enc
           openssl pkeyutl -encrypt \
             -pubin \
             -inkey scripts/subscription-export-public.pem \
@@ -76,14 +93,14 @@ jobs:
             -in /tmp/keyiv.bin \
             -out /tmp/keyiv.enc
           cd /tmp
-          sha256sum glados-config.enc keyiv.enc > SHA256SUMS
+          sha256sum glados-export.enc keyiv.enc > SHA256SUMS
 
       - name: Upload ciphertext only
         uses: actions/upload-artifact@v4
         with:
           name: glados-subscription-encrypted
           path: |
-            /tmp/glados-config.enc
+            /tmp/glados-export.enc
             /tmp/keyiv.enc
             /tmp/SHA256SUMS
           if-no-files-found: error
