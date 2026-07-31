@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch private subscription response
+      - name: Fetch private subscription
         env:
           GLADOS_COOKIE: ${{ secrets.GLADOS_COOKIE }}
         run: |
@@ -22,26 +22,40 @@ jobs:
           import pathlib
           import urllib.request
 
-          cookie = os.environ.get("GLADOS_COOKIE", "")
+          cookie = os.environ.get("GLADOS_COOKIE", "").split("&", 1)[0]
           if not cookie:
               raise SystemExit("GLADOS_COOKIE is missing")
 
+          headers = {
+              "Cookie": cookie,
+              "Origin": "https://glados.rocks",
+              "Referer": "https://glados.rocks/console/subscription",
+              "User-Agent": "Mozilla/5.0",
+          }
           request = urllib.request.Request(
-              "https://glados.rocks/api/user/config",
-              headers={
-                  "Cookie": cookie,
-                  "Origin": "https://glados.rocks",
-                  "Referer": "https://glados.rocks/console/nodes",
-                  "User-Agent": "Mozilla/5.0",
-              },
+              "https://glados.rocks/api/user/status", headers=headers
           )
           with urllib.request.urlopen(request, timeout=30) as response:
               raw = response.read()
           payload = json.loads(raw)
-          if payload.get("code") != 0 or "data" not in payload:
-              raise SystemExit("GLaDOS config endpoint rejected the authenticated request")
-          pathlib.Path("/tmp/glados-config.json").write_bytes(raw)
-          print(f"Authenticated config response accepted ({len(raw)} encrypted bytes pending)")
+          data = payload.get("data") or {}
+          required = ("configureId", "code", "port")
+          if not all(data.get(field) not in (None, "") for field in required):
+              raise SystemExit("GLaDOS status did not contain subscription coordinates")
+
+          subscription = (
+              "https://update.glados-config.com/mihomo/"
+              f"{data['configureId']}/{data['code']}/{data['port']}/glados.yaml"
+          )
+          config_request = urllib.request.Request(
+              subscription, headers={"User-Agent": "Mozilla/5.0"}
+          )
+          with urllib.request.urlopen(config_request, timeout=30) as response:
+              config = response.read()
+          if b"proxies:" not in config or b"US-Dedicated-B1-1" not in config:
+              raise SystemExit("subscription response failed the expected structure gate")
+          pathlib.Path("/tmp/glados-config.yaml").write_bytes(config)
+          print(f"Authenticated subscription accepted ({len(config)} encrypted bytes pending)")
           PY
 
       - name: Encrypt response for local operator
@@ -52,7 +66,7 @@ jobs:
           iv_hex="$(tail -c 16 /tmp/keyiv.bin | xxd -p -c 256)"
           openssl enc -aes-256-cbc \
             -K "$key_hex" -iv "$iv_hex" \
-            -in /tmp/glados-config.json \
+            -in /tmp/glados-config.yaml \
             -out /tmp/glados-config.enc
           openssl pkeyutl -encrypt \
             -pubin \
