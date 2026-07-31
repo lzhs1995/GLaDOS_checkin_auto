@@ -1,0 +1,76 @@
+name: Export encrypted GLaDOS subscription
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch private subscription response
+        env:
+          GLADOS_COOKIE: ${{ secrets.GLADOS_COOKIE }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.request
+
+          cookie = os.environ.get("GLADOS_COOKIE", "")
+          if not cookie:
+              raise SystemExit("GLADOS_COOKIE is missing")
+
+          request = urllib.request.Request(
+              "https://glados.rocks/api/user/config",
+              headers={
+                  "Cookie": cookie,
+                  "Origin": "https://glados.rocks",
+                  "Referer": "https://glados.rocks/console/nodes",
+                  "User-Agent": "Mozilla/5.0",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              raw = response.read()
+          payload = json.loads(raw)
+          if payload.get("code") != 0 or "data" not in payload:
+              raise SystemExit("GLaDOS config endpoint rejected the authenticated request")
+          pathlib.Path("/tmp/glados-config.json").write_bytes(raw)
+          print(f"Authenticated config response accepted ({len(raw)} encrypted bytes pending)")
+          PY
+
+      - name: Encrypt response for local operator
+        run: |
+          umask 077
+          openssl rand -out /tmp/keyiv.bin 48
+          key_hex="$(head -c 32 /tmp/keyiv.bin | xxd -p -c 256)"
+          iv_hex="$(tail -c 16 /tmp/keyiv.bin | xxd -p -c 256)"
+          openssl enc -aes-256-cbc \
+            -K "$key_hex" -iv "$iv_hex" \
+            -in /tmp/glados-config.json \
+            -out /tmp/glados-config.enc
+          openssl pkeyutl -encrypt \
+            -pubin \
+            -inkey scripts/subscription-export-public.pem \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -in /tmp/keyiv.bin \
+            -out /tmp/keyiv.enc
+          cd /tmp
+          sha256sum glados-config.enc keyiv.enc > SHA256SUMS
+
+      - name: Upload ciphertext only
+        uses: actions/upload-artifact@v4
+        with:
+          name: glados-subscription-encrypted
+          path: |
+            /tmp/glados-config.enc
+            /tmp/keyiv.enc
+            /tmp/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
